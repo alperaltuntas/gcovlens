@@ -14,20 +14,11 @@ Generate coverage and diff reports directly from directories of GCC `.gcov` file
 
 ## Install
 
-### Option A: Local (editable dev install)
 ```bash
 git clone https://github.com/alperaltuntas/gcovlens
 cd gcovlens
 pip install -e .
 ```
-
-### Option B: Local build & install
-```bash
-pip install build
-python -m build
-pip install dist/gcovlens-*.whl
-```
-
 
 > No Python dependencies required. Detail page syntax highlighting loads **highlight.js** from a CDN when `--syntax=hljs` is used.
 
@@ -36,13 +27,13 @@ pip install dist/gcovlens-*.whl
 ### Single-run (one directory)
 Generate a single coverage report and per-file detail pages:
 ```bash
-gcovlens path/to/runA -o report.html --format html
+gcovlens path/to/runA
 ```
 
 ### Diff mode (two directories)
 Compare Run A vs Run B, with a summary and detail pages:
 ```bash
-gcovlens path/to/runA path/to/runB -o diff.html --format html
+gcovlens path/to/runA path/to/runB
 ```
 
 The HTML writer also creates per-file details in a sibling directory:
@@ -58,7 +49,7 @@ gcovlens path/to/runA --format md -o report.md
 ### Common options
 ```
 --details-dir DIR       # where detail pages go (default: <output>_files)
---strip-blank           # hide blank whitespace-only lines (only when both sides are non-exec/no-data)
+--display-blank       In detail pages, show whitespace-only lines (non-exec/no-data only).
 --strip-comments        # hide comment-only lines (heuristic; same constraint as above)
 --syntax {off,hljs}     # syntax highlighting in detail pages (default: hljs)
 --syntax-theme {github,github-dark}
