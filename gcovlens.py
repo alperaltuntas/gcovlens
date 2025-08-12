@@ -364,7 +364,7 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
         const rows = Array.from(table.tBodies[0].rows);
         if (!rows.length) return;
 
-        // Build segments (unchanged)
+        // Build segments
         const total = rows.length;
         const segs = [];
         let curState = null, startIdx = 0;
@@ -401,7 +401,7 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
         frag.appendChild(view);
         mini.appendChild(frag);
 
-        // ---- Corrected viewport math ----
+        // View math
         let viewFrac = 0;
         function tableAbsTop(el){ const r = el.getBoundingClientRect(); return r.top + window.scrollY; }
         function updateView(){
@@ -410,17 +410,17 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
           const tableHeight = table.scrollHeight || rect.height || 1;
           const scrollTop = window.scrollY;
           const vh = window.innerHeight || document.documentElement.clientHeight || 0;
-          const interTop = clamp(scrollTop, tableTop, tableTop + tableHeight);
-          const interBottom = clamp(scrollTop + vh, tableTop, tableTop + tableHeight);
+          const interTop = Math.max(tableTop, Math.min(tableTop + tableHeight, scrollTop));
+          const interBottom = Math.max(tableTop, Math.min(tableTop + tableHeight, scrollTop + vh));
           const interHeight = Math.max(0, interBottom - interTop);
-          const topFrac = clamp((interTop - tableTop) / tableHeight, 0, 1);
-          viewFrac = clamp(interHeight / tableHeight, 0, 1);
-          const safeTop = clamp(topFrac, 0, 1 - viewFrac);
+          const topFrac = Math.max(0, Math.min(1, (interTop - tableTop) / tableHeight));
+          viewFrac = Math.max(0, Math.min(1, interHeight / tableHeight));
+          const safeTop = Math.max(0, Math.min(1 - viewFrac, topFrac));
           view.style.top = (safeTop * 100) + '%';
           view.style.height = (viewFrac * 100) + '%';
         }
 
-        // ---- Scroll + drag handling (separate RAF tokens) ----
+        // Scroll + drag (separate RAFs)
         let dragging = false;
         let rafScroll = 0;
         let rafDrag = 0;
@@ -431,18 +431,17 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
           const tableHeight = table.scrollHeight || rect.height || 1;
           const vh = window.innerHeight || document.documentElement.clientHeight || 0;
           const maxScroll = Math.max(0, tableHeight - vh);
-          const target = tableTop + clamp(frac, 0, 1) * maxScroll;
+          const target = tableTop + Math.max(0, Math.min(1, frac)) * maxScroll;
           window.scrollTo({ top: target, behavior: 'auto' });
-          // Force a view refresh on the next frame so the box tracks immediately while dragging
           requestAnimationFrame(updateView);
         }
 
         function onDrag(clientY){
           const mrect = mini.getBoundingClientRect();
           const H = Math.max(1, mrect.height);
-          const y = clamp(clientY - mrect.top, 0, H);
+          const y = Math.max(0, Math.min(H, clientY - mrect.top));
           const pos = y / H;
-          const topFrac = clamp(pos - viewFrac/2, 0, 1 - viewFrac);
+          const topFrac = Math.max(0, Math.min(1 - viewFrac, pos - viewFrac/2));
           scrollToFraction(topFrac);
         }
 
@@ -542,12 +541,25 @@ def write_diff_detail_page(outpath: Path, source: str, a: CoverageFile, b: Cover
         b_state = 'missing' if lb is None else lb.kind
         a_cnt = '' if la is None or la.count is None else str(la.count)
         b_cnt = '' if lb is None or lb.count is None else str(lb.count)
-        text = lb.text if lb is not None else (la.text if la is not None else '')
 
-        # hide only if BOTH sides are non-executable (nonexec/nodata/missing) and text matches filter
-        if (display_blank or not is_blank(text)) or (strip_comments and is_comment(text)):
-            nonexec_like_a = la is None or la.kind in ('nonexec','nodata')
-            nonexec_like_b = lb is None or lb.kind in ('nonexec','nodata')
+        # Prefer a non-empty code snippet from B, else A; fall back as needed
+        if lb is not None and lb.text and lb.text.strip():
+            text = lb.text
+        elif la is not None and la.text and la.text.strip():
+            text = la.text
+        elif lb is not None:
+            text = lb.text or ''
+        elif la is not None:
+            text = la.text or ''
+        else:
+            text = ''
+
+        # Only hide (never blank cells): for non-exec/no-data/missing on BOTH sides,
+        # hide if whitespace-only is to be hidden or comment-only is to be hidden.
+        hide_blank = not display_blank
+        if ((hide_blank and is_blank(text)) or (strip_comments and is_comment(text))):
+            nonexec_like_a = la is None or a_state in ('nonexec', 'nodata', 'missing')
+            nonexec_like_b = lb is None or b_state in ('nonexec', 'nodata', 'missing')
             if nonexec_like_a and nonexec_like_b:
                 continue
 
@@ -579,7 +591,6 @@ def write_diff_detail_page(outpath: Path, source: str, a: CoverageFile, b: Cover
       </div>
     </div>
     """)
-    # Minimap container
     parts.append("<div id='minimap' class='minimap' title='Click or drag to navigate'></div>")
 
     lang_cls = ('language-' + guess_language(source)) if guess_language(source) else ''
@@ -598,10 +609,7 @@ def write_diff_detail_page(outpath: Path, source: str, a: CoverageFile, b: Cover
         if a_state == 'nodata' or b_state == 'nodata':
             classes.append('nodata')
         row_style = " style='background:#e6ffed'" if status=='became_covered' else (" style='background:#ffebee'" if status=='became_uncovered' else "")
-        # minimap state logic:
-        # - changes → colored (became_covered / became_uncovered)
-        # - both sides nonexec/nodata/missing → gray (nonexec/nodata)
-        # - unchanged executable lines → neutral gray ("same")
+        # minimap state:
         if status in ('became_covered', 'became_uncovered'):
             state_for_minimap = status
         else:
@@ -628,12 +636,13 @@ def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
     lines = []
     for ln in sorted(cf.lines.keys()):
         li = cf.lines[ln]
-        # filter non-exec/no-data if requested
+        # filter non-exec/no-data if requested (hide-only; never blank cells)
         if li.kind in ('nonexec','nodata'):
             txt = li.text
-            if ((not display_blank) and is_blank(txt)) or (strip_comments and is_comment(txt)):
+            hide_blank = not display_blank
+            if (hide_blank and is_blank(txt)) or (strip_comments and is_comment(txt)):
                 continue
-        # human-readable state for the table cell
+        # human-readable state
         if li.kind == 'nonexec':
             state = 'non-exec'
         elif li.kind == 'nodata':
@@ -680,7 +689,7 @@ def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
         if kind == 'nodata':
             classes.append('nodata')
 
-        # Highlight covered rows green, uncovered rows red
+        # Highlight covered/uncovered
         if kind == 'covered':
             row_style = " style='background:#e6ffed'"
         elif kind == 'uncovered':
@@ -688,7 +697,6 @@ def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
         else:
             row_style = ""
 
-        # Use machine-friendly data-state so minimap colors always match
         data_state = kind if kind in ('covered','uncovered','nonexec','nodata') else 'covered'
 
         attrs = f" data-line='{ln}' data-state='{html.escape(data_state)}' id='L{ln}'"
@@ -826,13 +834,13 @@ def main(argv=None):
     parser.add_argument("--format", "-f", choices=["html", "md"], default="html", help="Output format")
     parser.add_argument("--show-lines", action="store_true", help="(MD only) Include per-file line numbers that changed coverage state in diff mode.")
     parser.add_argument("--details-dir", type=Path, default=None, help="(HTML) Directory to write per-file HTML detail pages. Default: <output>_files")
-    parser.add_argument("--display-blank", action="store_true", help="In detail pages, hide whitespace-only lines (non-exec/no-data only).")
+    parser.add_argument("--display-blank", action="store_true", help="In detail pages, show whitespace-only lines (non-exec/no-data only).")
     parser.add_argument("--strip-comments", action="store_true", help="In detail pages, hide comment-only lines (non-exec/no-data only; heuristic).")
     parser.add_argument("--syntax", choices=["off","hljs"], default="hljs", help="Syntax highlighting engine for detail pages.")
     parser.add_argument("--syntax-theme", choices=["github","github-dark"], default="github", help="Syntax theme when --syntax=hljs.")
     parser.add_argument("--ui-font-size", type=int, default=12, help="Base UI font size in px (summary & detail pages).")
     parser.add_argument("--code-font-size", type=float, default=13, help="Code font size in px (detail pages).")
-    parser.add_argument("--code-line-height", type=float, default=0.2, help="Code line-height (detail pages).")
+    parser.add_argument("--code-line-height", type=float, default=0.25, help="Code line-height (detail pages).")
     args = parser.parse_args(argv)
 
     # Expand '~' and normalize key paths early
@@ -861,7 +869,6 @@ def main(argv=None):
         if is_diff:
             run_b_base = args.run_b.name
             base = f"coverage_diff_{run_a_base}_V_{run_b_base}"
-        # If you want to force HTML exactly as requested, replace the next line with: ext = ".html"
         ext = ".html" if args.format == "html" else ".md"
         args.output = Path(base + ext)
 

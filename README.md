@@ -2,14 +2,15 @@
 
 Generate coverage and diff reports directly from directories of GCC `.gcov` files.
 
-- **Diff mode** (two dirs) and **Single-run** mode (one dir)
-- **HTML** & **Markdown** outputs
-- Per-file HTML **detail pages**
-- **Client-side sorting** with visible carets (▲ ▼) — default sort: filename (A→Z)
+- Diff mode (two dirs) and Single-run mode (one dir)
+- HTML & Markdown outputs
+- Per-file HTML detail pages
+- Sorting with visible carets (▲ ▼) — default sort: filename (A→Z)
 - Preserves non-exec (`-`) and no-data (`=====`) lines for context
-- Optional **hiding of blank/comment lines** in detail pages
-- Optional **syntax highlighting** via highlight.js (GitHub themes)
-- Adjustable **UI font size**, **code font**, and **line-height**
+- Optional hiding of blank/comment lines in detail pages
+- Optional syntax highlighting via highlight.js (GitHub themes)
+- Adjustable UI font size, code font, and line-height
+- A clickable, scrollable minimap for quick navigation
 
 ## Install
 
