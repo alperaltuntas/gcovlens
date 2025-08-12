@@ -14,6 +14,7 @@ Features
 - Optional syntax highlighting on detail pages via highlight.js (GitHub themes)
 - Adjustable UI font size, code font size, and code line-height
 - Detail pages' breadcrumb links back to the actual summary HTML filename
+- Detail pages include a right-side clickable, draggable minimap for quick navigation
 """
 import argparse
 import sys
@@ -220,6 +221,40 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
     code.hljs { padding: 0; background: transparent; font-weight: 400; }
     .hljs { background: transparent; }
     .hljs * { font-weight: 400; }
+
+    /* === Minimap === */
+    .minimap {
+      position: fixed;
+      right: 10px;
+      top: 84px;
+      width: 16px;
+      height: calc(100vh - 120px);
+      border-radius: 6px;
+      background: #f3f4f6;
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,0.08);
+      z-index: 999;
+      cursor: grab;
+    }
+    .minimap.dragging { cursor: grabbing; }
+    .minimap .seg {
+      position: absolute;
+      left: 0; width: 100%;
+      opacity: 0.9;
+    }
+    .minimap .seg.covered { background: #a7f3d0; }         /* light green */
+    .minimap .seg.uncovered { background: #fecaca; }       /* light red */
+    .minimap .seg.nonexec, .minimap .seg.nodata { background: #e5e7eb; } /* gray */
+    .minimap .seg.same { background: #e5e7eb; }            /* neutral gray for unchanged exec lines */
+    .minimap .seg.became_covered { background: #34d399; }  /* green */
+    .minimap .seg.became_uncovered { background: #f87171; }/* red */
+    .minimap .view {
+      position: absolute;
+      left: 0; width: 100%;
+      border: 1px solid rgba(0,0,0,0.35);
+      background: rgba(0,0,0,0.08);
+      border-radius: 3px;
+      pointer-events: none;
+    }
     </style>
     """
     css = css.replace("{UI_FONT_RULE}", ui_font_rule)
@@ -310,6 +345,153 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
     })();
     </script>
     """
+
+    js_minimap = """
+    <script>
+    (function(){
+      function initMinimap() {
+        const mini = document.getElementById('minimap');
+        if (!mini) return;
+        const table = document.querySelector('table.sortable');
+        if (!table || !table.tBodies[0]) return;
+        const rows = Array.from(table.tBodies[0].rows);
+        if (!rows.length) return;
+
+        // Coalesce adjacent rows with same state to reduce DOM nodes
+        const total = rows.length;
+        const segs = [];
+        let curState = null, startIdx = 0;
+
+        function rowState(r){
+          const s = r.getAttribute('data-state');
+          if (s) return s;
+          if (r.classList.contains('nonexec')) return 'nonexec';
+          if (r.classList.contains('nodata')) return 'nodata';
+          return 'covered';
+        }
+
+        rows.forEach((r, i) => {
+          const st = rowState(r);
+          if (curState === null) { curState = st; startIdx = i; return; }
+          if (st !== curState) {
+            segs.push([startIdx, i, curState]);
+            curState = st; startIdx = i;
+          }
+        });
+        segs.push([startIdx, rows.length, curState]);
+
+        mini.innerHTML = '';
+        const frag = document.createDocumentFragment();
+        segs.forEach(([s, e, st]) => {
+          const seg = document.createElement('div');
+          seg.className = 'seg ' + st;
+          const topPct = (s / total) * 100;
+          const hPct = ((e - s) / total) * 100;
+          seg.style.top = topPct + '%';
+          seg.style.height = hPct + '%';
+          seg.title = st;
+          seg.addEventListener('click', () => {
+            const target = rows[Math.min(s, rows.length - 1)];
+            if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          });
+          frag.appendChild(seg);
+        });
+
+        const view = document.createElement('div');
+        view.className = 'view';
+        frag.appendChild(view);
+        mini.appendChild(frag);
+
+        // Track current view height fraction for drag math
+        let viewFrac = 0;
+
+        function updateView(){
+          const rect = table.getBoundingClientRect();
+          const vh = window.innerHeight || document.documentElement.clientHeight;
+          const totalPx = Math.max(1, rect.height);
+          const visTopPx = Math.max(0, -rect.top);
+          const visBotPx = Math.max(0, Math.min(totalPx, vh - Math.max(0, rect.top)));
+          const visHeightPx = Math.max(0, visBotPx - visTopPx);
+          const topPct = (visTopPx / totalPx) * 100;
+          const hPct = (visHeightPx / totalPx) * 100;
+          view.style.top = topPct + '%';
+          view.style.height = hPct + '%';
+          viewFrac = hPct / 100;
+        }
+        updateView();
+        window.addEventListener('scroll', updateView, { passive: true });
+        window.addEventListener('resize', updateView);
+
+        // --- Drag to scroll (mouse + touch) ---
+        let dragging = false;
+        let raf = 0;
+
+        function scrollToFraction(frac){
+          const rect = table.getBoundingClientRect();
+          const tableTop = window.scrollY + rect.top;
+          const tableHeight = rect.height;
+          const vh = window.innerHeight || document.documentElement.clientHeight;
+          const maxScroll = Math.max(0, tableHeight - vh);
+          const target = tableTop + Math.max(0, Math.min(1, frac)) * maxScroll;
+          window.scrollTo({ top: target, behavior: 'auto' });
+        }
+
+        function onDrag(clientY){
+          const mrect = mini.getBoundingClientRect();
+          const H = Math.max(1, mrect.height);
+          let y = clientY - mrect.top;
+          y = Math.max(0, Math.min(H, y));
+          // position within minimap → top-of-viewport fraction
+          // subtract half the view height so the view box stays under the pointer
+          let pos = y / H;
+          let topFrac = Math.max(0, Math.min(1 - viewFrac, pos - viewFrac/2));
+          scrollToFraction(topFrac);
+        }
+
+        function onMouseMove(e){
+          if (!dragging) return;
+          if (raf) cancelAnimationFrame(raf);
+          raf = requestAnimationFrame(() => onDrag(e.clientY));
+        }
+
+        mini.addEventListener('mousedown', (e) => {
+          dragging = true;
+          mini.classList.add('dragging');
+          onDrag(e.clientY);
+          e.preventDefault();
+        });
+        document.addEventListener('mousemove', onMouseMove, { passive: false });
+        document.addEventListener('mouseup', () => {
+          dragging = false;
+          mini.classList.remove('dragging');
+        });
+
+        // Touch support
+        mini.addEventListener('touchstart', (e) => {
+          if (!e.touches.length) return;
+          dragging = true;
+          mini.classList.add('dragging');
+          onDrag(e.touches[0].clientY);
+          e.preventDefault();
+        }, { passive: false });
+
+        document.addEventListener('touchmove', (e) => {
+          if (!dragging || !e.touches.length) return;
+          if (raf) cancelAnimationFrame(raf);
+          raf = requestAnimationFrame(() => onDrag(e.touches[0].clientY));
+          e.preventDefault();
+        }, { passive: false });
+
+        document.addEventListener('touchend', () => {
+          dragging = false;
+          mini.classList.remove('dragging');
+        });
+      }
+      document.addEventListener('DOMContentLoaded', initMinimap);
+    })();
+    </script>
+    """
+
     # Optional syntax highlighting (via CDN)
     syntax_bits = ""
     if syntax == 'hljs':
@@ -328,7 +510,7 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
             "<script src='https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js'></script>"
             "<script>document.addEventListener('DOMContentLoaded', function(){ if(window.hljs){ hljs.highlightAll(); } });</script>"
         )
-    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title>{css}{js_sorter}{syntax_bits}</head>"
+    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title>{css}{js_sorter}{js_minimap}{syntax_bits}</head>"
 
 def is_blank(text: str) -> bool:
     return text.strip() == ""
@@ -389,6 +571,9 @@ def write_diff_detail_page(outpath: Path, source: str, a: CoverageFile, b: Cover
       </div>
     </div>
     """)
+    # Minimap container
+    parts.append("<div id='minimap' class='minimap' title='Click or drag to navigate'></div>")
+
     lang_cls = ('language-' + guess_language(source)) if guess_language(source) else ''
     parts.append("<table class='sortable'><thead><tr>"
                  "<th class='num' data-sort='num' aria-sort='asc'>Line<span class='caret'></span></th>"
@@ -405,8 +590,20 @@ def write_diff_detail_page(outpath: Path, source: str, a: CoverageFile, b: Cover
         if a_state == 'nodata' or b_state == 'nodata':
             classes.append('nodata')
         row_style = " style='background:#e6ffed'" if status=='became_covered' else (" style='background:#ffebee'" if status=='became_uncovered' else "")
+        # minimap state logic:
+        # - changes → colored (became_covered / became_uncovered)
+        # - both sides nonexec/nodata/missing → gray (nonexec/nodata)
+        # - unchanged executable lines → neutral gray ("same")
+        if status in ('became_covered', 'became_uncovered'):
+            state_for_minimap = status
+        else:
+            if (a_state in ('nonexec', 'nodata', 'missing')) and (b_state in ('nonexec', 'nodata', 'missing')):
+                state_for_minimap = 'nonexec' if ('nonexec' in (a_state, b_state)) else 'nodata'
+            else:
+                state_for_minimap = 'same'
+        attrs = f" data-line='{ln}' data-state='{html.escape(str(state_for_minimap))}' id='L{ln}'"
         parts.append(
-            f"<tr class=\"{' '.join(classes)}\"{row_style}><td class='num'>{ln}</td>"
+            f"<tr{attrs} class=\"{' '.join(classes)}\"{row_style}><td class='num'>{ln}</td>"
             f"<td class='num'>{html.escape(str(a_cnt))}</td>"
             f"<td class='num'>{html.escape(str(b_cnt))}</td>"
             f"<td>{html.escape(str(a_state))}</td>"
@@ -428,7 +625,7 @@ def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
             txt = li.text
             if (strip_blank and is_blank(txt)) or (strip_comments and is_comment(txt)):
                 continue
-        # state text
+        # human-readable state for the table cell
         if li.kind == 'nonexec':
             state = 'non-exec'
         elif li.kind == 'nodata':
@@ -458,6 +655,8 @@ def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
       </div>
     </div>
     """)
+    parts.append("<div id='minimap' class='minimap' title='Click or drag to navigate'></div>")
+
     lang_cls = ('language-' + guess_language(source)) if guess_language(source) else ''
     parts.append("<table class='sortable'><thead><tr>"
                  "<th class='num' data-sort='num' aria-sort='asc'>Line<span class='caret'></span></th>"
@@ -465,15 +664,28 @@ def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
                  "<th data-sort='alpha' aria-sort='none'>State<span class='caret'></span></th>"
                  "<th data-sort='alpha' aria-sort='none'>Code<span class='caret'></span></th>"
                  "</tr></thead><tbody>")
+
     for ln, cnt, state, text, kind in lines:
         classes = []
         if kind == 'nonexec':
             classes.append('nonexec')
         if kind == 'nodata':
             classes.append('nodata')
-        row_style = " style='background:#ffebee'" if state == 'uncovered' else ""
+
+        # ✅ Highlight covered rows green, uncovered rows red
+        if kind == 'covered':
+            row_style = " style='background:#e6ffed'"
+        elif kind == 'uncovered':
+            row_style = " style='background:#ffebee'"
+        else:
+            row_style = ""
+
+        # ✅ Use machine-friendly data-state so minimap colors always match
+        data_state = kind if kind in ('covered','uncovered','nonexec','nodata') else 'covered'
+
+        attrs = f" data-line='{ln}' data-state='{html.escape(data_state)}' id='L{ln}'"
         parts.append(
-            f"<tr class=\"{' '.join(classes)}\"{row_style}><td class='num'>{ln}</td>"
+            f"<tr{attrs} class=\"{' '.join(classes)}\"{row_style}><td class='num'>{ln}</td>"
             f"<td class='num'>{html.escape(str(cnt))}</td>"
             f"<td>{html.escape(state)}</td>"
             f"<td><pre><code class='hljs {lang_cls}'>{html.escape(text)}</code></pre></td></tr>"
@@ -639,7 +851,7 @@ def main(argv=None):
         try:
             details_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            print(f"ERROR: could not create details directory {details_dir}: {e}", file=sys.stderr)
+            print(f"ERROR: could not create details directory {args.details_dir}: {e}", file=sys.stderr)
             return 2
 
     if is_diff:
