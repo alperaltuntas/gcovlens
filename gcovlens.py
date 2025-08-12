@@ -864,10 +864,10 @@ def main(argv=None):
 
     # Always provide an output filename if none was given
     if args.output is None:
-        run_a_base = args.run_a.name
+        run_a_base = args.run_a.resolve().name
         base = f"coverage_{run_a_base}"
         if is_diff:
-            run_b_base = args.run_b.name
+            run_b_base = args.run_b.resolve().name
             base = f"coverage_diff_{run_a_base}_V_{run_b_base}"
         ext = ".html" if args.format == "html" else ".md"
         args.output = Path(base + ext)
@@ -964,6 +964,7 @@ def main(argv=None):
         print(f"ERROR: writing output failed: {e}", file=sys.stderr)
         return 2
 
+    print("")
     print(f"Wrote {args.format.upper()} report to: {args.output}")
     if args.format == "html" and details_dir is not None:
         print(f"Wrote per-file details to: {details_dir}/")
