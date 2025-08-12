@@ -124,6 +124,11 @@ def load_dir(d: Path) -> Dict[str, CoverageFile]:
         if cf is None:
             continue
         mapping[cf.source] = cf  # last wins
+    # if mapping is empty, see if there is a codecov directory
+    if not mapping:
+        codecov_dir = d / 'codecov'
+        if codecov_dir.exists() and codecov_dir.is_dir():
+            return load_dir(codecov_dir)
     return mapping
 
 def format_pct(x: float) -> str:
@@ -349,6 +354,8 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
     js_minimap = """
     <script>
     (function(){
+      function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
       function initMinimap() {
         const mini = document.getElementById('minimap');
         if (!mini) return;
@@ -357,11 +364,10 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
         const rows = Array.from(table.tBodies[0].rows);
         if (!rows.length) return;
 
-        // Coalesce adjacent rows with same state to reduce DOM nodes
+        // Build segments (unchanged)
         const total = rows.length;
         const segs = [];
         let curState = null, startIdx = 0;
-
         function rowState(r){
           const s = r.getAttribute('data-state');
           if (s) return s;
@@ -369,14 +375,10 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
           if (r.classList.contains('nodata')) return 'nodata';
           return 'covered';
         }
-
         rows.forEach((r, i) => {
           const st = rowState(r);
           if (curState === null) { curState = st; startIdx = i; return; }
-          if (st !== curState) {
-            segs.push([startIdx, i, curState]);
-            curState = st; startIdx = i;
-          }
+          if (st !== curState) { segs.push([startIdx, i, curState]); curState = st; startIdx = i; }
         });
         segs.push([startIdx, rows.length, curState]);
 
@@ -385,10 +387,8 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
         segs.forEach(([s, e, st]) => {
           const seg = document.createElement('div');
           seg.className = 'seg ' + st;
-          const topPct = (s / total) * 100;
-          const hPct = ((e - s) / total) * 100;
-          seg.style.top = topPct + '%';
-          seg.style.height = hPct + '%';
+          seg.style.top = (s / total * 100) + '%';
+          seg.style.height = (((e - s) / total) * 100) + '%';
           seg.title = st;
           seg.addEventListener('click', () => {
             const target = rows[Math.min(s, rows.length - 1)];
@@ -396,64 +396,71 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
           });
           frag.appendChild(seg);
         });
-
         const view = document.createElement('div');
         view.className = 'view';
         frag.appendChild(view);
         mini.appendChild(frag);
 
-        // Track current view height fraction for drag math
+        // ---- Corrected viewport math ----
         let viewFrac = 0;
-
+        function tableAbsTop(el){ const r = el.getBoundingClientRect(); return r.top + window.scrollY; }
         function updateView(){
+          const tableTop = tableAbsTop(table);
           const rect = table.getBoundingClientRect();
-          const vh = window.innerHeight || document.documentElement.clientHeight;
-          const totalPx = Math.max(1, rect.height);
-          const visTopPx = Math.max(0, -rect.top);
-          const visBotPx = Math.max(0, Math.min(totalPx, vh - Math.max(0, rect.top)));
-          const visHeightPx = Math.max(0, visBotPx - visTopPx);
-          const topPct = (visTopPx / totalPx) * 100;
-          const hPct = (visHeightPx / totalPx) * 100;
-          view.style.top = topPct + '%';
-          view.style.height = hPct + '%';
-          viewFrac = hPct / 100;
+          const tableHeight = table.scrollHeight || rect.height || 1;
+          const scrollTop = window.scrollY;
+          const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+          const interTop = clamp(scrollTop, tableTop, tableTop + tableHeight);
+          const interBottom = clamp(scrollTop + vh, tableTop, tableTop + tableHeight);
+          const interHeight = Math.max(0, interBottom - interTop);
+          const topFrac = clamp((interTop - tableTop) / tableHeight, 0, 1);
+          viewFrac = clamp(interHeight / tableHeight, 0, 1);
+          const safeTop = clamp(topFrac, 0, 1 - viewFrac);
+          view.style.top = (safeTop * 100) + '%';
+          view.style.height = (viewFrac * 100) + '%';
         }
-        updateView();
-        window.addEventListener('scroll', updateView, { passive: true });
-        window.addEventListener('resize', updateView);
 
-        // --- Drag to scroll (mouse + touch) ---
+        // ---- Scroll + drag handling (separate RAF tokens) ----
         let dragging = false;
-        let raf = 0;
+        let rafScroll = 0;
+        let rafDrag = 0;
 
         function scrollToFraction(frac){
           const rect = table.getBoundingClientRect();
           const tableTop = window.scrollY + rect.top;
-          const tableHeight = rect.height;
-          const vh = window.innerHeight || document.documentElement.clientHeight;
+          const tableHeight = table.scrollHeight || rect.height || 1;
+          const vh = window.innerHeight || document.documentElement.clientHeight || 0;
           const maxScroll = Math.max(0, tableHeight - vh);
-          const target = tableTop + Math.max(0, Math.min(1, frac)) * maxScroll;
+          const target = tableTop + clamp(frac, 0, 1) * maxScroll;
           window.scrollTo({ top: target, behavior: 'auto' });
+          // Force a view refresh on the next frame so the box tracks immediately while dragging
+          requestAnimationFrame(updateView);
         }
 
         function onDrag(clientY){
           const mrect = mini.getBoundingClientRect();
           const H = Math.max(1, mrect.height);
-          let y = clientY - mrect.top;
-          y = Math.max(0, Math.min(H, y));
-          // position within minimap → top-of-viewport fraction
-          // subtract half the view height so the view box stays under the pointer
-          let pos = y / H;
-          let topFrac = Math.max(0, Math.min(1 - viewFrac, pos - viewFrac/2));
+          const y = clamp(clientY - mrect.top, 0, H);
+          const pos = y / H;
+          const topFrac = clamp(pos - viewFrac/2, 0, 1 - viewFrac);
           scrollToFraction(topFrac);
         }
 
         function onMouseMove(e){
           if (!dragging) return;
-          if (raf) cancelAnimationFrame(raf);
-          raf = requestAnimationFrame(() => onDrag(e.clientY));
+          if (rafDrag) cancelAnimationFrame(rafDrag);
+          rafDrag = requestAnimationFrame(() => onDrag(e.clientY));
         }
 
+        // Initial + reactive updates
+        updateView();
+        window.addEventListener('scroll', () => {
+          if (rafScroll) return;
+          rafScroll = requestAnimationFrame(() => { rafScroll = 0; updateView(); });
+        }, { passive: true });
+        window.addEventListener('resize', updateView);
+
+        // Mouse
         mini.addEventListener('mousedown', (e) => {
           dragging = true;
           mini.classList.add('dragging');
@@ -464,9 +471,10 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
         document.addEventListener('mouseup', () => {
           dragging = false;
           mini.classList.remove('dragging');
+          requestAnimationFrame(updateView);
         });
 
-        // Touch support
+        // Touch
         mini.addEventListener('touchstart', (e) => {
           if (!e.touches.length) return;
           dragging = true;
@@ -474,19 +482,19 @@ def html_head(title: str, syntax: str = 'off', theme: str = 'github',
           onDrag(e.touches[0].clientY);
           e.preventDefault();
         }, { passive: false });
-
         document.addEventListener('touchmove', (e) => {
           if (!dragging || !e.touches.length) return;
-          if (raf) cancelAnimationFrame(raf);
-          raf = requestAnimationFrame(() => onDrag(e.touches[0].clientY));
+          if (rafDrag) cancelAnimationFrame(rafDrag);
+          rafDrag = requestAnimationFrame(() => onDrag(e.touches[0].clientY));
           e.preventDefault();
         }, { passive: false });
-
         document.addEventListener('touchend', () => {
           dragging = false;
           mini.classList.remove('dragging');
+          requestAnimationFrame(updateView);
         });
       }
+
       document.addEventListener('DOMContentLoaded', initMinimap);
     })();
     </script>
@@ -522,7 +530,7 @@ def is_comment(text: str) -> bool:
     return s.startswith('!') or s.startswith('//') or s.startswith('#') or s.startswith('/*') or s.startswith('*/')
 
 def write_diff_detail_page(outpath: Path, source: str, a: CoverageFile, b: CoverageFile,
-                           strip_blank: bool, strip_comments: bool, syntax: str, theme: str,
+                           display_blank: bool, strip_comments: bool, syntax: str, theme: str,
                            ui_font_size: Optional[int], code_font_size: float, code_line_height: float,
                            breadcrumb_href: str):
     all_lines = sorted(set(a.lines.keys()) | set(b.lines.keys()))
@@ -537,7 +545,7 @@ def write_diff_detail_page(outpath: Path, source: str, a: CoverageFile, b: Cover
         text = lb.text if lb is not None else (la.text if la is not None else '')
 
         # hide only if BOTH sides are non-executable (nonexec/nodata/missing) and text matches filter
-        if (strip_blank and is_blank(text)) or (strip_comments and is_comment(text)):
+        if (display_blank or not is_blank(text)) or (strip_comments and is_comment(text)):
             nonexec_like_a = la is None or la.kind in ('nonexec','nodata')
             nonexec_like_b = lb is None or lb.kind in ('nonexec','nodata')
             if nonexec_like_a and nonexec_like_b:
@@ -614,7 +622,7 @@ def write_diff_detail_page(outpath: Path, source: str, a: CoverageFile, b: Cover
     outpath.write_text("\n".join(parts), encoding='utf-8')
 
 def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
-                             strip_blank: bool, strip_comments: bool, syntax: str, theme: str,
+                             display_blank: bool, strip_comments: bool, syntax: str, theme: str,
                              ui_font_size: Optional[int], code_font_size: float, code_line_height: float,
                              breadcrumb_href: str):
     lines = []
@@ -623,7 +631,7 @@ def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
         # filter non-exec/no-data if requested
         if li.kind in ('nonexec','nodata'):
             txt = li.text
-            if (strip_blank and is_blank(txt)) or (strip_comments and is_comment(txt)):
+            if ((not display_blank) and is_blank(txt)) or (strip_comments and is_comment(txt)):
                 continue
         # human-readable state for the table cell
         if li.kind == 'nonexec':
@@ -672,7 +680,7 @@ def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
         if kind == 'nodata':
             classes.append('nodata')
 
-        # ✅ Highlight covered rows green, uncovered rows red
+        # Highlight covered rows green, uncovered rows red
         if kind == 'covered':
             row_style = " style='background:#e6ffed'"
         elif kind == 'uncovered':
@@ -680,7 +688,7 @@ def write_single_detail_page(outpath: Path, source: str, cf: CoverageFile,
         else:
             row_style = ""
 
-        # ✅ Use machine-friendly data-state so minimap colors always match
+        # Use machine-friendly data-state so minimap colors always match
         data_state = kind if kind in ('covered','uncovered','nonexec','nodata') else 'covered'
 
         attrs = f" data-line='{ln}' data-state='{html.escape(data_state)}' id='L{ln}'"
@@ -818,13 +826,13 @@ def main(argv=None):
     parser.add_argument("--format", "-f", choices=["html", "md"], default="html", help="Output format")
     parser.add_argument("--show-lines", action="store_true", help="(MD only) Include per-file line numbers that changed coverage state in diff mode.")
     parser.add_argument("--details-dir", type=Path, default=None, help="(HTML) Directory to write per-file HTML detail pages. Default: <output>_files")
-    parser.add_argument("--strip-blank", action="store_true", help="In detail pages, hide whitespace-only lines (non-exec/no-data only).")
+    parser.add_argument("--display-blank", action="store_true", help="In detail pages, hide whitespace-only lines (non-exec/no-data only).")
     parser.add_argument("--strip-comments", action="store_true", help="In detail pages, hide comment-only lines (non-exec/no-data only; heuristic).")
     parser.add_argument("--syntax", choices=["off","hljs"], default="hljs", help="Syntax highlighting engine for detail pages.")
     parser.add_argument("--syntax-theme", choices=["github","github-dark"], default="github", help="Syntax theme when --syntax=hljs.")
-    parser.add_argument("--ui-font-size", type=int, default=None, help="Base UI font size in px (summary & detail pages).")
-    parser.add_argument("--code-font-size", type=float, default=12, help="Code font size in px (detail pages).")
-    parser.add_argument("--code-line-height", type=float, default=1.25, help="Code line-height (detail pages).")
+    parser.add_argument("--ui-font-size", type=int, default=12, help="Base UI font size in px (summary & detail pages).")
+    parser.add_argument("--code-font-size", type=float, default=13, help="Code font size in px (detail pages).")
+    parser.add_argument("--code-line-height", type=float, default=0.2, help="Code line-height (detail pages).")
     args = parser.parse_args(argv)
 
     # Expand '~' and normalize key paths early
@@ -843,15 +851,28 @@ def main(argv=None):
         print(f"ERROR: {args.run_b} is not a directory", file=sys.stderr)
         return 2
 
+    # Decide mode
     is_diff = args.run_b is not None
 
+    # Always provide an output filename if none was given
+    if args.output is None:
+        run_a_base = args.run_a.name
+        base = f"coverage_{run_a_base}"
+        if is_diff:
+            run_b_base = args.run_b.name
+            base = f"coverage_diff_{run_a_base}_V_{run_b_base}"
+        # If you want to force HTML exactly as requested, replace the next line with: ext = ".html"
+        ext = ".html" if args.format == "html" else ".md"
+        args.output = Path(base + ext)
+
+    # Prepare details directory (HTML only)
     details_dir: Optional[Path] = None
-    if args.format == "html" and args.output is not None:
+    if args.format == "html":
         details_dir = args.details_dir or args.output.with_name(args.output.stem + "_files")
         try:
             details_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            print(f"ERROR: could not create details directory {args.details_dir}: {e}", file=sys.stderr)
+            print(f"ERROR: could not create details directory {details_dir}: {e}", file=sys.stderr)
             return 2
 
     if is_diff:
@@ -891,7 +912,7 @@ def main(argv=None):
                     detail_path = details_dir / fname
                     breadcrumb_href = os.path.relpath(args.output, start=detail_path.parent).replace('\\','/')
                     write_diff_detail_page(detail_path, r['file'], r['a'], r['b'],
-                                           args.strip_blank, args.strip_comments,
+                                           args.display_blank, args.strip_comments,
                                            args.syntax, args.syntax_theme,
                                            args.ui_font_size, args.code_font_size, args.code_line_height,
                                            breadcrumb_href=breadcrumb_href)
@@ -912,35 +933,34 @@ def main(argv=None):
                     detail_path = details_dir / fname
                     breadcrumb_href = os.path.relpath(args.output, start=detail_path.parent).replace('\\','/')
                     write_single_detail_page(detail_path, cf.source, cf,
-                                             args.strip_blank, args.strip_comments,
+                                             args.display_blank, args.strip_comments,
                                              args.syntax, args.syntax_theme,
                                              args.ui_font_size, args.code_font_size, args.code_line_height,
                                              breadcrumb_href=breadcrumb_href)
                     detail_links[cf.source] = f"{details_dir.name}/{fname}"
             out = to_html_single(files, detail_links, args.ui_font_size, args.code_font_size, args.code_line_height)
 
-    if args.output:
-        # Ensure output parent directory exists
-        try:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            print(f"ERROR: could not create parent directory for output {args.output}: {e}", file=sys.stderr)
-            return 2
-        try:
-            if args.format == "html" and details_dir is not None:
-                (details_dir / "index.html").write_text(out, encoding='utf-8')
-            args.output.write_text(out, encoding='utf-8')
-        except FileNotFoundError as e:
-            print(f"ERROR: could not write output file {args.output}: {e}", file=sys.stderr)
-            return 2
-        except Exception as e:
-            print(f"ERROR: writing output failed: {e}", file=sys.stderr)
-            return 2
-        print(f"Wrote {args.format.upper()} report to: {args.output}")
+    # Write the summary (and index.html inside details dir for convenience)
+    try:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"ERROR: could not create parent directory for output {args.output}: {e}", file=sys.stderr)
+        return 2
+    try:
         if args.format == "html" and details_dir is not None:
-            print(f"Wrote per-file details to: {details_dir}/")
-    else:
-        print(out)
+            (details_dir / "index.html").write_text(out, encoding='utf-8')
+        args.output.write_text(out, encoding='utf-8')
+    except FileNotFoundError as e:
+        print(f"ERROR: could not write output file {args.output}: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:
+        print(f"ERROR: writing output failed: {e}", file=sys.stderr)
+        return 2
+
+    print(f"Wrote {args.format.upper()} report to: {args.output}")
+    if args.format == "html" and details_dir is not None:
+        print(f"Wrote per-file details to: {details_dir}/")
+
 
 if __name__ == "__main__":
     sys.exit(main())
