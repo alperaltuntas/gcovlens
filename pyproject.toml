@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gcovlens"
+version = "0.1.0"
+description = "Generate coverage and diff reports from directories of GCC .gcov files (HTML/Markdown, per-file details, sorting)."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.8"
+authors = [{ name = "Alper Altuntas" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Environment :: Console",
+    "Topic :: Software Development :: Code Analysis",
+    "Topic :: Utilities"
+]
+dependencies = []
+
+[project.scripts]
+gcovlens = "gcovlens.gcovlens:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gcovlens"]
