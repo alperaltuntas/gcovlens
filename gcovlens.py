@@ -917,13 +917,13 @@ def main(argv=None):
                 for r in rows:
                     fname = sanitize_detail_name(r['file'])
                     detail_path = details_dir / fname
-                    breadcrumb_href = os.path.relpath(args.output, start=detail_path.parent).replace('\\','/')
+                    breadcrumb_href = "index.html"
                     write_diff_detail_page(detail_path, r['file'], r['a'], r['b'],
                                            args.display_blank, args.strip_comments,
                                            args.syntax, args.syntax_theme,
                                            args.ui_font_size, args.code_font_size, args.code_line_height,
                                            breadcrumb_href=breadcrumb_href)
-                    detail_links[r['file']] = f"{details_dir.name}/{fname}"
+                    detail_links[r['file']] = f"{fname}"
             out = to_html_diff(rows, totals, detail_links, args.ui_font_size, args.code_font_size, args.code_line_height)
 
     else:
@@ -938,13 +938,13 @@ def main(argv=None):
                 for cf in files:
                     fname = sanitize_detail_name(cf.source)
                     detail_path = details_dir / fname
-                    breadcrumb_href = os.path.relpath(args.output, start=detail_path.parent).replace('\\','/')
+                    breadcrumb_href = "index.html"
                     write_single_detail_page(detail_path, cf.source, cf,
                                              args.display_blank, args.strip_comments,
                                              args.syntax, args.syntax_theme,
                                              args.ui_font_size, args.code_font_size, args.code_line_height,
                                              breadcrumb_href=breadcrumb_href)
-                    detail_links[cf.source] = f"{details_dir.name}/{fname}"
+                    detail_links[cf.source] = f"{fname}"
             out = to_html_single(files, detail_links, args.ui_font_size, args.code_font_size, args.code_line_height)
 
     # Write the summary (and index.html inside details dir for convenience)
@@ -956,7 +956,8 @@ def main(argv=None):
     try:
         if args.format == "html" and details_dir is not None:
             (details_dir / "index.html").write_text(out, encoding='utf-8')
-        args.output.write_text(out, encoding='utf-8')
+        else:
+            args.output.write_text(out, encoding='utf-8')
     except FileNotFoundError as e:
         print(f"ERROR: could not write output file {args.output}: {e}", file=sys.stderr)
         return 2
